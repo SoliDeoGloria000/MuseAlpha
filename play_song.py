@@ -52,7 +52,10 @@ if __name__ == "__main__":
         steps_taken = 0
 
         while not done and steps_taken < max_steps:
-            action_id = agent.act(state)
+            # Apply the same action masking that was used during training so the
+            # agent only considers the valid action for the current timestep.
+            mask = env.get_action_mask()
+            action_id = agent.act(state, mask)
 
             action_details = env.actions[action_id]
             agent_actions.append(action_details)
