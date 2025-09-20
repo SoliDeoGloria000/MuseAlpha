@@ -51,6 +51,16 @@ def warm_start_supervised(agent, env, epochs=2):
 
 # --- 1. The Worker's Task ---
 # This function is executed by each parallel process.
+def _unpack_weight_packet(packet):
+    """Extract weights and epsilon information sent from the learner."""
+    if isinstance(packet, dict):
+        weights = packet.get('weights')
+        epsilon = packet.get('epsilon')
+        return weights, epsilon
+    # Backwards compatibility: older packets only contained the weights
+    return packet, None
+
+
 def worker_task(song_string, experience_queue, model_weights_queue, worker_id, episodes_per_worker, max_steps):
     """
     A worker's job is to:
@@ -67,9 +77,12 @@ def worker_task(song_string, experience_queue, model_weights_queue, worker_id, e
     
     # Get initial weights from the main process
     try:
-        initial_weights = model_weights_queue.get()
+        initial_packet = model_weights_queue.get()
+        initial_weights, initial_epsilon = _unpack_weight_packet(initial_packet)
         agent.model.set_weights(initial_weights)
         agent.target_model.set_weights(initial_weights)
+        if initial_epsilon is not None:
+            agent.epsilon = initial_epsilon
     except Exception as e:
         print(f"[Worker {worker_id}] Error getting initial weights: {e}")
         return
@@ -77,9 +90,12 @@ def worker_task(song_string, experience_queue, model_weights_queue, worker_id, e
     for episode in range(episodes_per_worker):
         # Periodically check for updated weights from the learner
         try:
-            new_weights = model_weights_queue.get_nowait()
+            new_packet = model_weights_queue.get_nowait()
+            new_weights, new_epsilon = _unpack_weight_packet(new_packet)
             agent.model.set_weights(new_weights)
             agent.target_model.set_weights(new_weights)
+            if new_epsilon is not None:
+                agent.epsilon = new_epsilon
         except:
             pass # No new weights available, just continue
 
@@ -119,7 +135,7 @@ if __name__ == "__main__":
     # Warm-start the policy with the correct action at each position
     warm_start_supervised(central_agent, temp_env, epochs=2)
     latest_weights = central_agent.model.get_weights()
-        
+
     # Load checkpoint if it exists
     if os.path.exists(CHECKPOINT_PATH):
         print(f"Loading checkpoint from {CHECKPOINT_PATH}...")
@@ -128,6 +144,7 @@ if __name__ == "__main__":
             central_agent.model.set_weights(checkpoint_data['model_weights'])
             central_agent.target_model.set_weights(checkpoint_data['target_model_weights'])
             central_agent.epsilon = checkpoint_data['epsilon']
+            latest_weights = central_agent.model.get_weights()
 
     # --- Configuration ---
     num_workers = max(1, multiprocessing.cpu_count() - 1) # Leave 2 cores for the learner and OS
@@ -149,7 +166,7 @@ if __name__ == "__main__":
     workers = []
     initial_weights = latest_weights
     for i in range(num_workers):
-        model_weights_queue.put(initial_weights)
+        model_weights_queue.put({'weights': latest_weights, 'epsilon': central_agent.epsilon})
         process = multiprocessing.Process(
             target=worker_task,
             args=(song_to_learn, experience_queue, model_weights_queue, i, episodes_per_worker, max_steps_per_episode)
@@ -190,8 +207,8 @@ if __name__ == "__main__":
                     # Clear the queue and add the new weights for workers to pick up
                     while not model_weights_queue.empty():
                         model_weights_queue.get()
-                    for _ in range(num_workers): 
-                        model_weights_queue.put(latest_weights)
+                    for _ in range(num_workers):
+                        model_weights_queue.put({'weights': latest_weights, 'epsilon': central_agent.epsilon})
                 
                 # Periodically save a checkpoint
                 if training_steps > 0 and training_steps % save_model_interval == 0:
